@@ -68,7 +68,7 @@ class StockDatabaseManager(DatabaseInterface):
             'port': config[section].get('port', '5432')
         }
     
-    def _init_connection_pool(self):
+    def _init_connection_pool(self)-> None:
         """初始化连接池"""
         try:
             self.pool = pool.SimpleConnectionPool(
@@ -209,55 +209,47 @@ class StockDatabaseManager(DatabaseInterface):
             self.pool.putconn(conn)
     
     def execute(
-    self,
-    query: Union[str, Composed],  # 允许 psycopg2.sql.Composed 类型
-    params: Optional[Union[Tuple[Any, ...], Dict[str, Any], List[Any]]] = None,
-    fetch: bool = False,
-    many: bool = False
-) -> Union[bool, List[Dict[str, Any]]]:
-        """执行SQL语句
+        self, 
+        query: sql.Composed, 
+        params: tuple = (), 
+        fetch: bool = True
+    ) -> Union[List[Dict[str, Any]], int, None]:
+        """执行SQL语句（基础方法）
         
         Args:
-            query: SQL查询语句
-            params: 查询参数，可以是元组、字典或列表
-            fetch: 是否返回查询结果
-            many: 是否执行批量操作
+            query: 构建好的SQL对象
+            params: 查询参数
+            fetch: 是否获取结果
             
         Returns:
-            如果 fetch=True 返回查询结果(List[Dict])
-            否则返回 bool 表示操作是否成功
+            根据操作类型返回：
+            - SELECT: 结果列表
+            - INSERT/UPDATE/DELETE: 影响的行数
+            - 不获取结果时返回None
             
         Raises:
-            QueryError: 当SQL执行失败时
-            ValueError: 当批量操作缺少参数时
+            DatabaseError: 当执行失败时
         """
-        with self._get_connection() as conn:
-            with conn.cursor(cursor_factory=extras.DictCursor) as cursor:
-                try:
-                    if many:
-                        if not params:
-                            raise ValueError("批量操作需要参数列表")
-                        cursor.executemany(query, params)  # type: ignore
-                    else:
-                        if params:
-                            cursor.execute(query, params)
-                        else:
-                            cursor.execute(query)
-                    
-                    conn.commit()
-                    
-                    if fetch:
-                        columns = [desc[0] for desc in cursor.description]
-                        return [
-                            dict(zip(columns, row)) 
-                            for row in cursor.fetchall()
-                        ]
-                    return True
-                    
-                except Exception as e:
-                    conn.rollback()
-                    logger.error("SQL执行失败: %s\nSQL: %s", e, query)
-                    raise QueryError(f"SQL execution failed: {e}") from e
+        try:
+            with self.connection.cursor() as cursor:
+                cursor.execute(query, params)
+                
+                if not fetch:
+                    self.connection.commit()
+                    if cursor.rowcount != -1:  # 返回影响行数
+                        return cursor.rowcount
+                    return None
+                
+                # 获取结果并转换为字典列表
+                if cursor.description:
+                    columns = [col[0] for col in cursor.description]
+                    return [dict(zip(columns, row)) for row in cursor.fetchall()]
+                return []
+                
+        except Exception as e:
+            self.connection.rollback()
+            logger.error(f"SQL执行失败: {str(e)}\nQuery: {query.as_string(self.connection)}")
+            raise DatabaseError(f"SQL执行失败: {str(e)}") from e
     
     def ensure_table_exists(self, table_name: str) -> bool:
         """确保表存在"""
@@ -349,7 +341,11 @@ class StockDatabaseManager(DatabaseInterface):
     
     def bulk_upsert(self, table_name: str, data: List[Dict], update_fields: List[str]) -> int:
         """批量插入或更新数据"""
-        if not data or not update_fields:
+        if not update_fields:  # 必须字段检查
+            raise ValueError("更新字段列表不能为空")
+    
+        if not data:  # 空数据视为合法情况
+            logger.debug("接收到空数据列表")
             return 0
             
         columns = list(data[0].keys())
@@ -400,63 +396,166 @@ class StockDatabaseManager(DatabaseInterface):
                     raise
     
     def query(
-        self,
-        table_name: str,
-        conditions: Optional[Dict] = None,
-        fields: Optional[List[str]] = None,
-        order_by: Optional[str] = None,
-        ascending: bool = True,
-        limit: Optional[int] = None
-    ) -> List[Dict[str, Any]]:
-        """查询数据"""
-        select_fields = (
-            sql.SQL(', ').join(map(sql.Identifier, fields)) 
-            if fields else sql.SQL('*')
-        )
+    self,
+    table_name: str,
+    conditions: Optional[Dict[str, Any]] = None,
+    fields: Optional[List[str]] = None,
+    order_by: Optional[str] = None,
+    ascending: bool = True,
+    limit: Optional[int] = None
+) -> List[Dict[str, Any]]:
+        """执行查询并返回结果列表
         
-        query = sql.SQL("SELECT {} FROM {}").format(
-            select_fields, sql.Identifier(table_name))
-        
-        params = []
-        where_clauses = []
-        
-        if conditions:
-            for col, val in conditions.items():
-                where_clauses.append(sql.SQL("{} = %s").format(sql.Identifier(col)))
-                params.append(val)
+        Args:
+            table_name: 表名
+            conditions: 查询条件字典
+            fields: 要返回的字段列表
+            order_by: 排序字段
+            ascending: 是否升序
+            limit: 结果限制数量
             
-            query = sql.SQL("{} WHERE {}").format(
-                query, sql.SQL(" AND ").join(where_clauses))
-        
-        if order_by:
-            order_dir = sql.SQL("ASC") if ascending else sql.SQL("DESC")
-            query = sql.SQL("{} ORDER BY {} {}").format(
-                query, sql.Identifier(order_by), order_dir)
-        
-        if limit:
-            query = sql.SQL("{} LIMIT %s").format(query)
-            params.append(limit)
-        
-        result = self.execute(query, tuple(params), fetch=True)
-        if not isinstance(result, list):
-            raise TypeError("Expected list result from query")
-        return result
+        Returns:
+            总返回包含字典的列表（无结果时返回空列表）
+            
+        Raises:
+            DatabaseError: 当查询执行失败时
+            TypeError: 当返回结果格式不符合预期时
+        """
+        try:
+            # 构造SELECT字段部分
+            select_fields = (
+                sql.SQL(', ').join(map(sql.Identifier, fields)) 
+                if fields else sql.SQL('*')
+            )
+            
+            # 基础查询语句（修正了括号匹配）
+            query = sql.SQL("SELECT {} FROM {}").format(
+                select_fields, 
+                sql.Identifier(table_name)
+            )
+            
+            params = []
+            where_clauses = []
+            
+            # 添加WHERE条件
+            if conditions:
+                for col, val in conditions.items():
+                    if isinstance(val, dict) and 'operator' in val:  # 处理特殊操作符
+                        op = val['operator']
+                        if op.upper() == 'BETWEEN' and isinstance(val['value'], (list, tuple)):
+                            where_clauses.append(
+                                sql.SQL("{} BETWEEN %s AND %s").format(sql.Identifier(col))
+                            )
+                            params.extend(val['value'])
+                        else:
+                            where_clauses.append(
+                                sql.SQL("{} {} %s").format(sql.Identifier(col), sql.SQL(op))
+                            )
+                            params.append(val['value'])
+                    else:  # 普通等于条件
+                        where_clauses.append(
+                            sql.SQL("{} = %s").format(sql.Identifier(col))
+                        )
+                        params.append(val)
+                
+                query = sql.SQL("{} WHERE {}").format(
+                    query, 
+                    sql.SQL(" AND ").join(where_clauses)
+                )
+            
+            # 添加ORDER BY
+            if order_by:
+                order_dir = sql.SQL("ASC") if ascending else sql.SQL("DESC")
+                query = sql.SQL("{} ORDER BY {} {}").format(
+                    query, 
+                    sql.Identifier(order_by), 
+                    order_dir
+                )
+            
+            # 添加LIMIT
+            if limit:
+                query = sql.SQL("{} LIMIT %s").format(query)
+                params.append(limit)
+            
+            # 执行查询
+            result = self.execute(query, tuple(params), fetch=True)
+            
+            # 类型验证
+            if not isinstance(result, list):
+                raise TypeError(
+                    f"预期返回列表类型，实际得到 {type(result).__name__}")
+            
+            if result and not all(isinstance(row, dict) for row in result):
+                raise TypeError("结果中的行必须是字典类型")
+                
+            return result
+            
+        except Exception as e:
+            logger.error(f"查询{table_name}失败: {str(e)}")
+            raise DatabaseError(f"数据库查询失败: {str(e)}") from e
+
     
-    def delete(self, table_name: str, conditions: Dict) -> int:
-        """删除数据"""
-        where_clauses = [
-            sql.SQL("{} = %s").format(sql.Identifier(col))
-            for col in conditions.keys()
-        ]
+    def delete(
+    self,
+    table_name: str,
+    conditions: Dict[str, Any],
+    return_affected_rows: bool = True
+) -> int:
+        """删除符合条件的数据
         
-        query = sql.SQL("DELETE FROM {} WHERE {}").format(
-            sql.Identifier(table_name),
-            sql.SQL(" AND ").join(where_clauses)
-        )
-        success = self.execute(query, tuple(conditions.values()))
-        if not isinstance(success, bool):
-            raise TypeError("Expected bool result from delete operation")
-        return cursor.rowcount if success else 0
+        Args:
+            table_name: 目标表名
+            conditions: 删除条件字典 {列名: 值}
+            return_affected_rows: 是否返回影响行数
+            
+        Returns:
+            影响的行数（默认返回）
+            或 0（当return_affected_rows=False且操作成功时）
+            
+        Raises:
+            DatabaseError: 当删除操作失败时
+            TypeError: 当返回结果类型不符合预期时
+        """
+        try:
+            # 参数校验（新增）
+            if not conditions:
+                raise ValueError("删除条件不能为空字典")
+
+            # 构建WHERE条件
+            where_clauses = [
+                sql.SQL("{} = %s").format(sql.Identifier(col))
+                for col in conditions.keys()
+            ]
+            
+            query = sql.SQL("DELETE FROM {} WHERE {}").format(
+                sql.Identifier(table_name),
+                sql.SQL(" AND ").join(where_clauses)
+            )
+            
+            # 执行删除（fetch=False表示不需要返回结果集）
+            result = self.execute(
+                query, 
+                tuple(conditions.values()),
+                fetch=False
+            )
+            
+            # 严格的类型检查
+            if not isinstance(result, int) or result < 0:
+                raise TypeError(
+                    f"预期返回非负整数影响行数，实际得到 {type(result).__name__}: {result}"
+                )
+                
+            return result if return_affected_rows else 0
+            
+        except Exception as e:
+            logger.error(
+                "删除表[%s]记录失败，条件: %s。错误: %s",
+                table_name,
+                conditions,
+                str(e),
+                exc_info=True
+            )
+            raise DatabaseError(f"删除操作失败: {str(e)}") from e
     
     def save_task_progress(self, task_id: str, progress_data: Dict) -> bool:
         """保存任务进度"""

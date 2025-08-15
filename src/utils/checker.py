@@ -11,10 +11,8 @@
 import pandas as pd
 import pandas_market_calendars as mcal
 import akshare as ak
-from typing import Optional, Union, List, Dict
-
+from typing import Optional, Union, List, Dict, Any
 from datetime import datetime, date
-
 from ..database.manager import StockDatabaseManager
 from .date_utils import parse_date
 
@@ -44,14 +42,14 @@ class TradingDayChecker:
             )
             
             if result:
-                return result[0]['is_trading_day']
-            
+                return bool(result[0]['is_trading_day'])
             # 从交易所日历查询
-            result = self._check_with_exchange(date_obj, exchange)
+            exchange_result = self._check_with_exchange(date_obj, exchange)
+
             if update_local:
-                self._update_local_calendar([date_obj], result, exchange)
-            return result
-            
+                self._update_local_calendar([date_obj], exchange_result, exchange)
+            return exchange_result
+        
         elif method == 'database':
             result = self.db.query(
                 'trading_calendar',
@@ -101,16 +99,16 @@ class TradingDayChecker:
     def _update_local_calendar(
         self, 
         dates: List[date], 
-        is_trading_day: bool, 
+        is_trading_day: Union[bool, List[Dict[str, Any]]],  # 修改参数类型
         exchange: str
-    ):
+    ) -> None:
         """更新本地交易日历"""
         data = [{
-            'trade_date': date.strftime('%Y-%m-%d'),
-            'is_trading_day': is_trading_day,
-            'exchange': exchange,
-            'holiday_name': None if is_trading_day else '节假日'
-        } for date in dates]
+        'trade_date': date.strftime('%Y-%m-%d'),
+        'is_trading_day': is_trading_day,
+        'exchange': exchange,
+        'holiday_name': None if is_trading_day else '节假日'
+    } for date in dates]
         
         self.db.bulk_upsert(
             'trading_calendar',
@@ -136,7 +134,7 @@ class TradingDayChecker:
         else:
             raise ValueError("无效的数据源，请选择 'exchange' 或 'akshare'")
     
-    def _update_from_exchange(self, start: date, end: date, exchange: str):
+    def _update_from_exchange(self, start: date, end: date, exchange: str)-> None:
         """从交易所日历更新"""
         try:
             exchange_cal = mcal.get_calendar(exchange)
@@ -165,7 +163,7 @@ class TradingDayChecker:
         except Exception as e:
             raise ValueError(f"从交易所 {exchange} 更新日历失败: {e}")
     
-    def _update_from_ak(self, start: date, end: date, exchange: str):
+    def _update_from_ak(self, start: date, end: date, exchange: str)-> None:
         """从akshare更新"""
         try:
             trade_dates = ak.tool_trade_date_hist_sina()
@@ -200,7 +198,7 @@ class TradingDayChecker:
         end_date: Union[str, date, datetime],
         exchange: str = 'SSE',
         only_trading_days: bool = True
-    ) -> List[Dict]:
+    ) -> List[Dict[str, Any]]:
         """获取交易日历"""
         start = parse_date(start_date)
         end = parse_date(end_date)
