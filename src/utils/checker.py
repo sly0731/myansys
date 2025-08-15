@@ -15,10 +15,11 @@ from typing import Optional, Union, List, Dict, Any
 from datetime import datetime, date
 from ..database.manager import StockDatabaseManager
 from .date_utils import parse_date
+import logging
 
 class TradingDayChecker:
     """交易日检查器"""
-    
+    logger = logging.getLogger(__name__)
     def __init__(self, db_manager: StockDatabaseManager):
         self.db = db_manager
     
@@ -122,7 +123,7 @@ class TradingDayChecker:
         end_date: Union[str, date, datetime],
         exchange: str = 'SSE',
         source: str = 'exchange'
-    ):
+    )-> None:
         """更新交易日历"""
         start = parse_date(start_date)
         end = parse_date(end_date)

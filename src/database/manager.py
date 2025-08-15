@@ -9,7 +9,8 @@
 """
 
 import psycopg2
-from psycopg2 import sql, pool, extras,Composed
+from psycopg2 import sql, pool, extras
+from psycopg2.sql import Composed
 import logging
 from typing import Dict, List, Optional, Union, Any, Tuple
 from contextlib import contextmanager
@@ -43,7 +44,8 @@ class StockDatabaseManager(DatabaseInterface):
         self._init_connection_pool()
         self._init_schemas()
         self._ensure_base_structure()
-        
+        self.connection = None
+
     def _load_db_config(self, config_file: str, section: str) -> Dict:
         """加载数据库配置"""
         if not os.path.exists(config_file):
@@ -90,7 +92,7 @@ class StockDatabaseManager(DatabaseInterface):
             'stock_hot': StockHotDataSchema()
         }
     
-    def _ensure_base_structure(self):
+    def _ensure_base_structure(self)->None:
         """确保基础数据库结构存在"""
         try:
             # 创建TimescaleDB扩展
@@ -109,7 +111,7 @@ class StockDatabaseManager(DatabaseInterface):
             logger.error("初始化基础数据库结构失败: %s", e)
             raise
     
-    def _create_table_if_not_exists(self, table_type: str):
+    def _create_table_if_not_exists(self, table_type: str)-> None:
         """创建表如果不存在"""
         schema = self.schemas[table_type]
         columns_sql = ', '.join([f"{col} {dtype}" for col, dtype in schema.columns.items()])
@@ -125,7 +127,8 @@ class StockDatabaseManager(DatabaseInterface):
         for index_sql in schema.indexes:
             self.execute(index_sql.format(table_name=schema.table_name))
     
-    def _create_stock_hot_table_function(self):
+    def _create_stock_hot_table_function(self)-> None:
+
         """创建动态生成股票表的函数"""
         create_function_sql = """
         CREATE OR REPLACE FUNCTION create_stock_hot_table(symbol VARCHAR) 
@@ -296,7 +299,9 @@ class StockDatabaseManager(DatabaseInterface):
             values=sql.SQL(', ').join([sql.Placeholder()] * len(values))
         )
         
-        return self.execute(query, tuple(values))
+        result = self.execute(query, tuple(values))
+        if result and isinstance(result, list):  # 先检查类型
+            return result[0]
     
     def bulk_insert(self, table_name: str, data: List[Dict]) -> int:
         """批量插入数据"""
@@ -559,7 +564,7 @@ class StockDatabaseManager(DatabaseInterface):
     
     def save_task_progress(self, task_id: str, progress_data: Dict) -> bool:
         """保存任务进度"""
-        return self.execute(
+        result = self.execute(
             """
             INSERT INTO task_progress (task_id, progress_data)
             VALUES (%s, %s)
@@ -569,6 +574,8 @@ class StockDatabaseManager(DatabaseInterface):
             """,
             (task_id, extras.Json(progress_data))
         )
+        if result and isinstance(result, list):  # 先检查类型
+            return result[0]
     
     def load_task_progress(self, task_id: str) -> Optional[Dict]:
         """加载任务进度"""
@@ -577,14 +584,19 @@ class StockDatabaseManager(DatabaseInterface):
             (task_id,),
             fetch=True
         )
-        return result[0]['progress_data'] if result else None
+        if result and isinstance(result, list):  # 先检查类型
+            return result[0]['progress_data'] if result else None
+
+        # return result[0]['progress_data'] if result else None
     
     def delete_task_progress(self, task_id: str) -> bool:
         """删除任务进度"""
-        return self.execute(
+        result = self.execute(
             "DELETE FROM task_progress WHERE task_id = %s",
-            (task_id,)
+            (task_id,)  
         )
+        if result and isinstance(result, list):  # 先检查类型
+            return result[0]
     
     def close(self):
         """关闭连接池"""
